@@ -1,0 +1,75 @@
+{
+  "name": "call-site-navigator",
+  "displayName": "Call Site Navigator",
+  "description": "Jump back to the exact call site after a Go to Definition, bypassing VS Code's global navigation stack.",
+  "version": "1.0.0",
+  "publisher": "SRK",
+  "license": "MIT",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "keywords": ["navigation", "go to definition", "call site", "jump back", "history"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/siva-krish45/Call-Site-Navigator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/siva-krish45/Call-Site-Navigator/issues"
+  },
+  "homepage": "https://github.com/siva-krish45/Call-Site-Navigator#readme",
+  "activationEvents": [],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "callSiteNav.goToDefinition",
+        "title": "Call Site Navigator: Go to Definition"
+      },
+      {
+        "command": "callSiteNav.jumpBack",
+        "title": "Call Site Navigator: Jump Back to Call Site"
+      },
+      {
+        "command": "callSiteNav.dumpState",
+        "title": "Call Site Navigator: Dump Navigation State (debug)"
+      },
+      {
+        "command": "callSiteNav.toggleDiagnostics",
+        "title": "Call Site Navigator: Toggle Diagnostics Logging"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "callSiteNav.goToDefinition",
+        "key": "f12",
+        "mac": "f12",
+        "when": "editorTextFocus && !inDebugMode"
+      },
+      {
+        "command": "callSiteNav.jumpBack",
+        "key": "alt+q",
+        "mac": "alt+q",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test:unit": "TS_NODE_PROJECT=tsconfig.unit.json mocha --require ts-node/register --require tsconfig-paths/register 'test/unit/**/*.test.ts'",
+    "test:integration": "npm run compile && vscode-test",
+    "test": "npm run test:unit && npm run test:integration",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-cli": "^0.0.6",
+    "@vscode/test-electron": "^2.3.8",
+    "mocha": "^10.3.0",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.3.3"
+  }
+}
