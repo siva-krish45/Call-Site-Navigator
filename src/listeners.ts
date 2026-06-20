@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
-import { getActivePair, evictDocument, pushPair } from './store';
+import { evictDocument, pushCallSite } from './store';
 import { jumpState } from './jumpState';
 import { captureGuard } from './captureGuard';
 import { pendingState } from './pending';
 import { log } from './log';
-import { CallSitePair } from './types';
+import { CallSite } from './types';
 
 interface Pos {
     uri: vscode.Uri;
@@ -18,12 +18,9 @@ interface Pos {
 // call site when the DefinitionProvider did not fire).
 let lastPos: Pos | null = null;
 
-// Previous active editor (for cross-file capture). Primed at activation.
-let prevActiveEditorUri: string | null = null;
-
-// When true, logs EVERY selection/active-editor event (verbose diagnostic).
+// When true, logs EVERY selection event (verbose diagnostic).
 // Off by default; toggle via the "Call Site Navigator: Toggle Diagnostics" command.
-let diagnosticRaw = false;
+let diagnosticRaw = true;
 
 export function setDiagnosticRaw(on: boolean): void {
     diagnosticRaw = on;
@@ -33,6 +30,13 @@ export function setDiagnosticRaw(on: boolean): void {
 const JUMP_MIN_LINES = 3;     // same-file move this big counts as a navigation
 const PENDING_TTL_MS = 4000;  // provider call site is valid this long
 const FALLBACK_TTL_MS = 4000; // cursor fallback freshness
+// A same-file Ctrl+Click is a click IMMEDIATELY followed by an automatic jump to
+// the definition — the two cursor events land within a few dozen ms of each other.
+// Deliberate browsing clicks are spaced far further apart (human reaction time).
+// We only treat a cursor-sourced same-file move as a navigation when it happened
+// within this window after the preceding cursor event. This is the signal that
+// separates "go to definition" from "I clicked somewhere" without a provider.
+const SAME_FILE_NAV_WINDOW_MS = 300;
 
 function kindName(k: vscode.TextEditorSelectionChangeKind | undefined): string {
     switch (k) {
@@ -45,12 +49,10 @@ function kindName(k: vscode.TextEditorSelectionChangeKind | undefined): string {
 
 export function _resetNavigationState(): void {
     lastPos = null;
-    prevActiveEditorUri = null;
 }
 
 export function primeNavigationTracking(): void {
     const editor = vscode.window.activeTextEditor;
-    prevActiveEditorUri = editor?.document.uri.toString() ?? null;
     if (editor) {
         const pos = editor.selection.active;
         const wordRange = editor.document.getWordRangeAtPosition(pos);
@@ -62,31 +64,27 @@ export function primeNavigationTracking(): void {
             at:        Date.now(),
         };
     }
-    log.info(`Navigation tracking primed — editor: ${prevActiveEditorUri ?? '(none)'}, word: ${lastPos?.token || '(none)'}`);
+    log.info(`Navigation tracking primed — word: ${lastPos?.token || '(none)'}`);
 }
 
-function recordPair(cs: Pos, defUri: vscode.Uri, defLine: number, defChar: number, via: string): void {
-    const pair: CallSitePair = {
-        callSiteUri:         cs.uri,
-        callSiteLine:        cs.line,
-        callSiteCharacter:   cs.character,
-        callSiteToken:       cs.token,
-        definitionUri:       defUri,
-        definitionLine:      defLine,
-        definitionCharacter: defChar,
-        toggleTarget:        null,
+function recordCallSite(cs: Pos, defLine: number, via: string): void {
+    const callSite: CallSite = {
+        uri:         cs.uri,
+        line:        cs.line,
+        character:   cs.character,
+        token:       cs.token,
     };
-    pushPair(pair);
-    log.info(`[${via}] Pair: "${cs.token}" ${cs.uri.fsPath}:${cs.line} → ${defUri.fsPath}:${defLine}`);
+    pushCallSite(callSite);
+    log.info(`[${via}] Call site registered: "${cs.token}" line:${cs.line} (jumped to line:${defLine})`);
 }
 
 /**
- * Attempt to record a call-site→definition pair given where we just landed.
+ * Attempt to record a call-site given where we just landed.
  * Call-site source priority:
  *   1. pendingState (DefinitionProvider) — exact position VS Code resolved.
  *   2. lastPos — the cursor position right before this event.
- * A pair is only recorded if the landing is a genuine move (different file, or
- * >= JUMP_MIN_LINES away in the same file).
+ * A call site is only recorded if the landing is in the same file and is a genuine move
+ * (>= JUMP_MIN_LINES away).
  */
 function tryCapture(
     now: number,
@@ -101,28 +99,45 @@ function tryCapture(
     let cs: Pos | null = null;
     let source = '';
     const pending = pendingState.callSite;
-    if (pending && (now - pending.at) <= PENDING_TTL_MS) {
+    if (pending && (now - pending.at) <= PENDING_TTL_MS && pending.uri.scheme === 'file') {
         cs = { ...pending };
         source = 'provider';
-    } else if (lastPos && lastPos.token && (now - lastPos.at) <= FALLBACK_TTL_MS) {
+    } else if (lastPos && lastPos.token && (now - lastPos.at) <= FALLBACK_TTL_MS && lastPos.uri.scheme === 'file') {
         cs = lastPos;
         source = 'cursor';
     }
-    if (!cs) return false;
-    if (cs.uri.scheme !== 'file') return false;
+    if (!cs) {
+        if (diagnosticRaw) log.info(`[cap] reject(${via}): no call-site source (pending=${pending ? 'stale' : 'none'}, lastPos=${lastPos ? `${lastPos.token || 'no-token'}@${now - lastPos.at}ms` : 'none'})`);
+        return false;
+    }
 
     const fileChanged = cs.uri.toString() !== landingUri.toString();
-    const delta = Math.abs(cs.line - landingLine);
-    if (!fileChanged && delta < JUMP_MIN_LINES) return false;
+    if (fileChanged) {
+        if (diagnosticRaw) log.info(`[cap] reject(${via}): cross-file jump ignored`);
+        return false;
+    }
 
-    recordPair(cs, landingUri, landingLine, landingChar, `${via}/${source}`);
+    const delta = Math.abs(cs.line - landingLine);
+    const dt = now - cs.at;
+    if (diagnosticRaw) log.info(`[cap] try(${via}): src=${source} delta=${delta} dt=${dt}ms tok="${cs.token}"`);
+
+    if (delta < JUMP_MIN_LINES) {
+        if (diagnosticRaw) log.info(`[cap] reject: same-file move too small (delta=${delta} < ${JUMP_MIN_LINES})`);
+        return false;
+    }
+    if (source !== 'provider' && dt > SAME_FILE_NAV_WINDOW_MS) {
+        if (diagnosticRaw) log.info(`[cap] reject: same-file click too slow to be auto-jump (dt=${dt}ms > ${SAME_FILE_NAV_WINDOW_MS}ms) — looks like browsing, not go-to-def`);
+        return false;
+    }
+
+    recordCallSite(cs, landingLine, `${via}/${source}`);
     pendingState.callSite = null; // consumed
     return true;
 }
 
 /**
  * PRIMARY capture path: a Go-to-Definition moves the cursor, which surfaces here.
- * Works for same-file and cross-file. Skips Keyboard-kind moves (typing/arrows).
+ * Works for same-file. Skips Keyboard-kind moves (typing/arrows).
  */
 export function createSelectionListener(): vscode.Disposable {
     return vscode.window.onDidChangeTextEditorSelection((e) => {
@@ -140,17 +155,16 @@ export function createSelectionListener(): vscode.Disposable {
         if (uri.scheme !== 'file') return; // ignore output channel, debug console, etc.
 
         const now = Date.now();
-        const uriStr = uri.toString();
         const pos = e.selections[0].active;
         const kind = e.kind;
 
-        // Diagnostic: log meaningful moves (file change or >= JUMP_MIN_LINES).
+        // Diagnostic: log meaningful moves (>= JUMP_MIN_LINES).
         if (diagnosticRaw && lastPos) {
-            const fileChanged = lastPos.uri.toString() !== uriStr;
+            const fileChanged = lastPos.uri.toString() !== uri.toString();
             const delta = Math.abs(lastPos.line - pos.line);
-            if (fileChanged || delta >= JUMP_MIN_LINES) {
+            if (!fileChanged && delta >= JUMP_MIN_LINES) {
                 const pend = pendingState.callSite;
-                log.info(`[sel] kind=${kindName(kind)} ${fileChanged ? '(file) ' : ''}${lastPos.line}→${pos.line}  pending=${pend ? `"${pend.token}"` : 'none'}`);
+                log.info(`[sel] kind=${kindName(kind)} ${lastPos.line}→${pos.line}  pending=${pend ? `"${pend.token}"` : 'none'}`);
             }
         }
 
@@ -169,54 +183,6 @@ export function createSelectionListener(): vscode.Disposable {
             token:     wordRange ? e.textEditor.document.getText(wordRange) : '',
             at:        now,
         };
-
-        // Toggle-clear: cursor drifted far from ref line → drop toggleTarget.
-        const pair = getActivePair(uriStr);
-        if (pair?.toggleTarget) {
-            const refLine = uriStr === pair.callSiteUri.toString()
-                ? pair.callSiteLine
-                : pair.definitionLine;
-            if (Math.abs(pos.line - refLine) > 2) {
-                pair.toggleTarget = null;
-            }
-        }
-    });
-}
-
-/**
- * BACKUP capture for cross-file navigation where the destination's selection
- * event may not surface a usable move.
- */
-export function createActiveEditorListener(): vscode.Disposable {
-    return vscode.window.onDidChangeActiveTextEditor((editor) => {
-        if (diagnosticRaw) {
-            const u = editor?.document.uri;
-            log.info(`[raw-active] ${u ? `${u.scheme}:${u.path.split('/').pop()}` : '(none)'}`);
-        }
-        if (!editor) return;
-        if (editor.document.uri.scheme !== 'file') return; // ignore output/debug panels
-
-        const prev = prevActiveEditorUri;
-        prevActiveEditorUri = editor.document.uri.toString();
-
-        if (jumpState.isExecuting || captureGuard.suppress) return;
-        if (prev && prev === editor.document.uri.toString()) return;
-
-        tryCapture(
-            Date.now(),
-            editor.document.uri,
-            editor.selection.active.line,
-            editor.selection.active.character,
-            'nav',
-        );
-    });
-}
-
-export function createDocumentChangeListener(): vscode.Disposable {
-    return vscode.workspace.onDidChangeTextDocument((e) => {
-        const uri = e.document.uri.toString();
-        const pair = getActivePair(uri);
-        if (pair) pair.toggleTarget = null;
     });
 }
 

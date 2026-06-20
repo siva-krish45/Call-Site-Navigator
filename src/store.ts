@@ -1,100 +1,74 @@
 import * as vscode from 'vscode';
-import { CallSitePair } from './types';
+import { CallSite } from './types';
 
 const MAX_STACK_DEPTH = 50;
 
-// Primary index: callSiteUri → LIFO stack of pairs
-const callSiteStacks = new Map<string, CallSitePair[]>();
+// LIFO stacks per document URI
+const callSiteStacks = new Map<string, CallSite[]>();
 
-// Reverse index: definitionUri → most recent pair (cross-file jump-back lookup)
-// NOT populated when callSiteUri === definitionUri (same-file navigation)
-const definitionIndex = new Map<string, CallSitePair>();
+// The most recently popped CallSite per document URI (used for empty-stack toggle forward)
+const lastPoppedSites = new Map<string, CallSite>();
 
-// Monotonic recency counter. Each push gets the next value so we can compare
-// "which pair is more recent" across the two indexes.
-let seqCounter = 0;
+export function pushCallSite(cs: CallSite): void {
+    const key = cs.uri.toString();
 
-export function pushPair(pair: CallSitePair): void {
-    const callKey = pair.callSiteUri.toString();
+    // Clear last popped site since a new navigation chain is starting
+    lastPoppedSites.delete(key);
 
-    if (!callSiteStacks.has(callKey)) {
-        callSiteStacks.set(callKey, []);
+    if (!callSiteStacks.has(key)) {
+        callSiteStacks.set(key, []);
     }
-    const stack = callSiteStacks.get(callKey)!;
+    const stack = callSiteStacks.get(key)!;
 
-    // Dedup: if the top of the stack already describes this exact call-site →
-    // definition jump, refresh it in place instead of stacking a duplicate.
-    // Guards against double-capture (F12 command + active-editor listener) and
-    // repeated navigation from the same site.
+    // Dedup: if the top of the stack is identical, skip pushing
     const top = stack[stack.length - 1];
     if (
         top &&
-        top.callSiteUri.toString() === pair.callSiteUri.toString() &&
-        top.callSiteLine === pair.callSiteLine &&
-        top.callSiteToken === pair.callSiteToken &&
-        top.definitionUri.toString() === pair.definitionUri.toString() &&
-        top.definitionLine === pair.definitionLine
+        top.line === cs.line &&
+        top.token === cs.token
     ) {
-        top.toggleTarget = null;     // fresh navigation resets the toggle
-        top.seq = ++seqCounter;      // ...and makes it the most-recent pair again
-        if (pair.callSiteUri.toString() !== pair.definitionUri.toString()) {
-            definitionIndex.set(pair.definitionUri.toString(), top);
-        }
         return;
     }
 
     if (stack.length >= MAX_STACK_DEPTH) {
         stack.shift(); // evict oldest to cap memory
     }
-    pair.seq = ++seqCounter;
-    stack.push(pair);
-
-    // Skip reverse index for same-file pairs — avoids ambiguous URI lookup
-    if (pair.callSiteUri.toString() !== pair.definitionUri.toString()) {
-        definitionIndex.set(pair.definitionUri.toString(), pair);
-    }
+    stack.push(cs);
 }
 
-export function getActivePair(activeUri: string): CallSitePair | undefined {
-    // A file can be BOTH a cross-file definition target and a same-file call site.
-    // Resolve the conflict by recency: return whichever pair was navigated most
-    // recently. This makes a fresh same-file jump win over a stale cross-file one
-    // (and vice-versa).
-    const crossFile = definitionIndex.get(activeUri);          // active file is a definition
-    const sameOrCall = callSiteStacks.get(activeUri)?.at(-1);  // active file is a call site
-
-    if (crossFile && sameOrCall) {
-        return (sameOrCall.seq ?? 0) >= (crossFile.seq ?? 0) ? sameOrCall : crossFile;
-    }
-    return crossFile ?? sameOrCall;
-}
-
-/**
- * Looser lookup used by jump-back: tries the precise indexes first, then scans
- * every stack for the most-recent pair that touches this URI (as either the
- * definition or the call site). This rescues cases where the active URI does not
- * exactly match the stored definition URI (e.g. a definition opened in a peek or
- * a slightly different scheme).
- */
-export function findPairLoose(activeUri: string): CallSitePair | undefined {
-    const direct = getActivePair(activeUri);
-    if (direct) return direct;
-
-    let newest: CallSitePair | undefined;
-    for (const stack of callSiteStacks.values()) {
-        for (let i = stack.length - 1; i >= 0; i--) {
-            const p = stack[i];
-            if (
-                p.definitionUri.toString() === activeUri ||
-                p.callSiteUri.toString() === activeUri
-            ) {
-                return p; // most-recent within this stack
-            }
+export function popCallSite(uri: string): CallSite | undefined {
+    const stack = callSiteStacks.get(uri);
+    if (stack) {
+        const cs = stack.pop();
+        if (stack.length === 0) {
+            callSiteStacks.delete(uri);
         }
-        const t = stack[stack.length - 1];
-        if (t) newest = t;
+        if (cs) {
+            lastPoppedSites.set(uri, cs);
+        }
+        return cs;
     }
-    return newest;
+    return undefined;
+}
+
+export function peekCallSite(uri: string): CallSite | undefined {
+    return callSiteStacks.get(uri)?.at(-1);
+}
+
+export function getLastPopped(uri: string): CallSite | undefined {
+    return lastPoppedSites.get(uri);
+}
+
+export function clearLastPopped(uri: string): void {
+    lastPoppedSites.delete(uri);
+}
+
+export function pushLastPoppedBack(uri: string, cs: CallSite): void {
+    if (!callSiteStacks.has(uri)) {
+        callSiteStacks.set(uri, []);
+    }
+    callSiteStacks.get(uri)!.push(cs);
+    lastPoppedSites.delete(uri);
 }
 
 /** Human-readable dump of the entire store — for the diagnostics command. */
@@ -102,48 +76,33 @@ export function dumpState(): string {
     const lines: string[] = [];
     lines.push(`callSiteStacks: ${callSiteStacks.size} file(s)`);
     for (const [key, stack] of callSiteStacks) {
-        lines.push(`  ${key}  (${stack.length} pair${stack.length === 1 ? '' : 's'})`);
+        lines.push(`  ${key}  (${stack.length} call site${stack.length === 1 ? '' : 's'})`);
         for (const p of stack) {
-            lines.push(`    "${p.callSiteToken}" ${p.callSiteUri.fsPath}:${p.callSiteLine} → ${p.definitionUri.fsPath}:${p.definitionLine}${p.toggleTarget ? ' [toggle armed]' : ''}`);
+            lines.push(`    "${p.token}" line:${p.line}`);
         }
     }
-    lines.push(`definitionIndex: ${definitionIndex.size} entry(ies)`);
-    for (const key of definitionIndex.keys()) {
-        lines.push(`  ${key}`);
+    lines.push(`lastPoppedSites: ${lastPoppedSites.size} entry(ies)`);
+    for (const [key, p] of lastPoppedSites) {
+        lines.push(`  ${key} -> "${p.token}" line:${p.line} (defLine:${p.definitionLine ?? 'none'})`);
     }
     return lines.join('\n');
 }
 
-export function popPair(pair: CallSitePair): void {
-    const stack = callSiteStacks.get(pair.callSiteUri.toString());
-    if (stack) {
-        const idx = stack.lastIndexOf(pair);
-        if (idx !== -1) stack.splice(idx, 1);
-        if (stack.length === 0) {
-            callSiteStacks.delete(pair.callSiteUri.toString());
-        }
-    }
-    definitionIndex.delete(pair.definitionUri.toString());
-}
-
 export function evictDocument(uri: string): void {
-    // Remove all pairs where this document is the call site
     callSiteStacks.delete(uri);
-    // Remove any pair where this document is the definition
-    definitionIndex.delete(uri);
+    lastPoppedSites.delete(uri);
 }
 
 export function clearAll(): void {
     callSiteStacks.clear();
-    definitionIndex.clear();
-    seqCounter = 0;
+    lastPoppedSites.clear();
 }
 
 // Exposed for unit tests only
-export function _getStack(uri: string): CallSitePair[] | undefined {
+export function _getStack(uri: string): CallSite[] | undefined {
     return callSiteStacks.get(uri);
 }
 
-export function _getDefinitionIndex(): Map<string, CallSitePair> {
-    return definitionIndex;
+export function _getLastPoppedMap(): Map<string, CallSite> {
+    return lastPoppedSites;
 }

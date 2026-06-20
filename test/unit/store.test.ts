@@ -1,199 +1,112 @@
 import * as assert from 'assert';
 import {
-    pushPair,
-    getActivePair,
-    findPairLoose,
-    popPair,
+    pushCallSite,
+    popCallSite,
+    peekCallSite,
+    getLastPopped,
+    clearLastPopped,
+    pushLastPoppedBack,
     evictDocument,
     clearAll,
     _getStack,
-    _getDefinitionIndex,
+    _getLastPoppedMap,
 } from '../../src/store';
-import { CallSitePair } from '../../src/types';
+import { CallSite } from '../../src/types';
 
 function makeUri(path: string) {
     return { toString: () => path } as any;
 }
 
-function makePair(
-    callPath: string,
-    callLine: number,
-    defPath: string,
-    defLine: number
-): CallSitePair {
+function makeCallSite(
+    path: string,
+    line: number,
+    token = 'findAge'
+): CallSite {
     return {
-        callSiteUri:       makeUri(callPath),
-        callSiteLine:      callLine,
-        callSiteCharacter: 0,
-        callSiteToken:     'findAge',
-        definitionUri:       makeUri(defPath),
-        definitionLine:      defLine,
-        definitionCharacter: 0,
-        toggleTarget:        null,
+        uri:       makeUri(path),
+        line:      line,
+        character: 0,
+        token:     token,
     };
 }
 
 beforeEach(() => clearAll());
 
-describe('pushPair', () => {
-    it('populates callSiteStacks', () => {
-        pushPair(makePair('file:///a.ts', 10, 'file:///b.ts', 42));
+describe('pushCallSite', () => {
+    it('populates callSiteStacks for same-file pairs', () => {
+        pushCallSite(makeCallSite('file:///a.ts', 10));
         assert.equal(_getStack('file:///a.ts')?.length, 1);
     });
 
-    it('populates definitionIndex for cross-file pairs', () => {
-        pushPair(makePair('file:///a.ts', 10, 'file:///b.ts', 42));
-        assert.ok(_getDefinitionIndex().has('file:///b.ts'));
-    });
+    it('clears lastPopped on new pushCallSite', () => {
+        const cs = makeCallSite('file:///a.ts', 10);
+        pushCallSite(cs);
+        popCallSite('file:///a.ts');
+        assert.ok(getLastPopped('file:///a.ts'));
 
-    it('does NOT populate definitionIndex for same-file pairs', () => {
-        pushPair(makePair('file:///a.ts', 10, 'file:///a.ts', 80));
-        assert.ok(!_getDefinitionIndex().has('file:///a.ts'));
+        pushCallSite(makeCallSite('file:///a.ts', 20));
+        assert.strictEqual(getLastPopped('file:///a.ts'), undefined);
     });
 
     it('enforces MAX_STACK_DEPTH by evicting oldest entry', () => {
         for (let i = 0; i < 51; i++) {
-            pushPair(makePair('file:///a.ts', i, 'file:///b.ts', i));
+            pushCallSite(makeCallSite('file:///a.ts', i));
         }
         const stack = _getStack('file:///a.ts')!;
         assert.equal(stack.length, 50);
-        assert.equal(stack[0].callSiteLine, 1); // line 0 was evicted
+        assert.equal(stack[0].line, 1); // line 0 was evicted
     });
 
     it('multiple pushes accumulate on the stack', () => {
-        pushPair(makePair('file:///a.ts', 10, 'file:///b.ts', 1));
-        pushPair(makePair('file:///a.ts', 20, 'file:///b.ts', 2));
+        pushCallSite(makeCallSite('file:///a.ts', 10));
+        pushCallSite(makeCallSite('file:///a.ts', 20));
         assert.equal(_getStack('file:///a.ts')?.length, 2);
     });
 
-    it('dedups an identical top-of-stack pair instead of stacking it', () => {
-        pushPair(makePair('file:///a.ts', 10, 'file:///b.ts', 42));
-        pushPair(makePair('file:///a.ts', 10, 'file:///b.ts', 42));
+    it('dedups an identical top-of-stack call site instead of stacking it', () => {
+        pushCallSite(makeCallSite('file:///a.ts', 10));
+        pushCallSite(makeCallSite('file:///a.ts', 10));
         assert.equal(_getStack('file:///a.ts')?.length, 1);
     });
 
-    it('resets toggleTarget when a duplicate navigation is recorded', () => {
-        const pair = makePair('file:///a.ts', 10, 'file:///b.ts', 42);
-        pushPair(pair);
-        pair.toggleTarget = { uri: makeUri('file:///b.ts'), line: 42, character: 0 };
-        pushPair(makePair('file:///a.ts', 10, 'file:///b.ts', 42));
-        assert.strictEqual(_getStack('file:///a.ts')![0].toggleTarget, null);
-    });
-
-    it('does NOT dedup when only the definition line differs', () => {
-        pushPair(makePair('file:///a.ts', 10, 'file:///b.ts', 42));
-        pushPair(makePair('file:///a.ts', 10, 'file:///b.ts', 43));
+    it('does NOT dedup when line differs', () => {
+        pushCallSite(makeCallSite('file:///a.ts', 10));
+        pushCallSite(makeCallSite('file:///a.ts', 11));
         assert.equal(_getStack('file:///a.ts')?.length, 2);
     });
 });
 
-describe('findPairLoose', () => {
-    it('finds a pair by exact definition URI (same as getActivePair)', () => {
-        const pair = makePair('file:///a.ts', 10, 'file:///b.ts', 42);
-        pushPair(pair);
-        assert.strictEqual(findPairLoose('file:///b.ts'), pair);
-    });
-
-    it('finds a pair when the active file is the call site', () => {
-        const pair = makePair('file:///a.ts', 10, 'file:///b.ts', 42);
-        pushPair(pair);
-        assert.strictEqual(findPairLoose('file:///a.ts'), pair);
-    });
-
-    it('returns undefined when nothing has been recorded', () => {
-        assert.strictEqual(findPairLoose('file:///nothing.ts'), undefined);
-    });
-
-    it('falls back to the newest pair when the URI matches nothing', () => {
-        const pair = makePair('file:///a.ts', 10, 'file:///b.ts', 42);
-        pushPair(pair);
-        // An unrelated active file still yields the most-recent pair as a fallback.
-        assert.strictEqual(findPairLoose('file:///unrelated.ts'), pair);
-    });
-});
-
-describe('getActivePair', () => {
-    it('finds pair via definitionIndex (cross-file lookup)', () => {
-        const pair = makePair('file:///a.ts', 10, 'file:///b.ts', 42);
-        pushPair(pair);
-        assert.strictEqual(getActivePair('file:///b.ts'), pair);
-    });
-
-    it('finds pair via callSiteStack (same-file lookup)', () => {
-        const pair = makePair('file:///a.ts', 10, 'file:///a.ts', 80);
-        pushPair(pair);
-        assert.strictEqual(getActivePair('file:///a.ts'), pair);
-    });
-
-    it('returns undefined for unknown URI', () => {
-        assert.strictEqual(getActivePair('file:///unknown.ts'), undefined);
-    });
-
-    it('returns top of stack (most recent pair)', () => {
-        const p1 = makePair('file:///a.ts', 10, 'file:///b.ts', 1);
-        const p2 = makePair('file:///a.ts', 20, 'file:///b.ts', 2);
-        pushPair(p1);
-        pushPair(p2);
-        // definitionIndex holds the last pushed; stack top is p2
-        assert.strictEqual(getActivePair('file:///b.ts'), p2);
-    });
-
-    it('prefers a fresh same-file pair over an older cross-file landing in the same file', () => {
-        // A → B (cross-file), THEN a same-file jump within B.
-        const cross = makePair('file:///a.ts', 10, 'file:///b.ts', 100);
-        pushPair(cross);
-        const sameFile = makePair('file:///b.ts', 105, 'file:///b.ts', 200);
-        pushPair(sameFile);
-        // Active in B: the more recent same-file pair must win, not the cross-file one.
-        assert.strictEqual(getActivePair('file:///b.ts'), sameFile);
-    });
-
-    it('prefers a fresh cross-file landing over an older same-file pair', () => {
-        const sameFile = makePair('file:///b.ts', 105, 'file:///b.ts', 200);
-        pushPair(sameFile);
-        const cross = makePair('file:///a.ts', 10, 'file:///b.ts', 100);
-        pushPair(cross);
-        // Active in B: the more recent cross-file landing must win.
-        assert.strictEqual(getActivePair('file:///b.ts'), cross);
-    });
-});
-
-describe('popPair', () => {
-    it('removes pair from callSiteStacks', () => {
-        const pair = makePair('file:///a.ts', 10, 'file:///b.ts', 42);
-        pushPair(pair);
-        popPair(pair);
+describe('popCallSite & getLastPopped', () => {
+    it('popCallSite retrieves, deletes from stack, and sets lastPoppedSite', () => {
+        const cs = makeCallSite('file:///a.ts', 10);
+        pushCallSite(cs);
+        assert.strictEqual(popCallSite('file:///a.ts'), cs);
+        assert.strictEqual(getLastPopped('file:///a.ts'), cs);
         assert.strictEqual(_getStack('file:///a.ts'), undefined);
     });
+});
 
-    it('removes pair from definitionIndex', () => {
-        const pair = makePair('file:///a.ts', 10, 'file:///b.ts', 42);
-        pushPair(pair);
-        popPair(pair);
-        assert.strictEqual(getActivePair('file:///b.ts'), undefined);
-    });
+describe('pushLastPoppedBack', () => {
+    it('pushes the site back onto stack and clears lastPopped', () => {
+        const cs = makeCallSite('file:///a.ts', 10);
+        pushCallSite(cs);
+        popCallSite('file:///a.ts');
 
-    it('leaves other pairs in the stack intact', () => {
-        const p1 = makePair('file:///a.ts', 10, 'file:///b.ts', 1);
-        const p2 = makePair('file:///a.ts', 20, 'file:///b.ts', 2);
-        pushPair(p1);
-        pushPair(p2);
-        popPair(p2);
+        const popped = getLastPopped('file:///a.ts')!;
+        pushLastPoppedBack('file:///a.ts', popped);
+
         assert.equal(_getStack('file:///a.ts')?.length, 1);
-        assert.strictEqual(_getStack('file:///a.ts')?.[0], p1);
+        assert.strictEqual(_getStack('file:///a.ts')![0], cs);
+        assert.strictEqual(getLastPopped('file:///a.ts'), undefined);
     });
 });
 
 describe('evictDocument', () => {
-    it('clears callSiteStacks for the given URI', () => {
-        pushPair(makePair('file:///a.ts', 10, 'file:///b.ts', 42));
+    it('clears stack and lastPopped for the given URI', () => {
+        pushCallSite(makeCallSite('file:///a.ts', 10));
+        popCallSite('file:///a.ts');
         evictDocument('file:///a.ts');
         assert.strictEqual(_getStack('file:///a.ts'), undefined);
-    });
-
-    it('clears definitionIndex for the given URI', () => {
-        pushPair(makePair('file:///a.ts', 10, 'file:///b.ts', 42));
-        evictDocument('file:///b.ts');
-        assert.strictEqual(getActivePair('file:///b.ts'), undefined);
+        assert.strictEqual(getLastPopped('file:///a.ts'), undefined);
     });
 });

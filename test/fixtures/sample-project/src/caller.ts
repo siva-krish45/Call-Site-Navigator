@@ -15,4 +15,12 @@ function localFn(): string {
     return helperFn();
 }
 
+// Same-file definition for testing F12 same-file jump
+export function sameFileHelper(): string {
+    return 'same';
+}
+
+// Call site 5 (same-file) — line 23
+export const testVal = sameFileHelper();
+
 export { age1, age2, age3, localFn };

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { findPairLoose, popPair, dumpState } from './store';
+import { peekCallSite, popCallSite, getLastPopped, pushLastPoppedBack } from './store';
 import { reAnchorToken } from './anchor';
 import { jumpState } from './jumpState';
 import { log } from './log';
@@ -19,48 +19,48 @@ export function createJumpBackCommand(): vscode.Disposable {
         if (!activeEditor) return;
 
         const activeUri = activeEditor.document.uri.toString();
-        const pair = findPairLoose(activeUri);
-        if (!pair) {
-            log.info(`Jump back pressed — no pair found for active file: ${activeUri}`);
-            log.info(`--- store state ---\n${dumpState()}\n-------------------`);
-            log.show();
+        
+        // Priority 1: If stack has entries, pop the top one and jump back.
+        const stackTop = peekCallSite(activeUri);
+        if (stackTop) {
+            jumpState.isExecuting = true;
+            try {
+                log.info(`Jump back (stack pop) -> jumping to call site line:${stackTop.line}`);
+                const callDoc = await vscode.workspace.openTextDocument(stackTop.uri);
+                const anchoredLine = reAnchorToken(callDoc, stackTop.line, stackTop.token);
+                
+                // Record where we are leaving from as the definitionLine
+                stackTop.definitionLine = activeEditor.selection.active.line;
+
+                // Pop it, moving it to lastPoppedSites
+                popCallSite(activeUri);
+
+                await revealAt(stackTop.uri, anchoredLine, stackTop.character);
+            } finally {
+                jumpState.isExecuting = false;
+            }
             return;
         }
 
-        jumpState.isExecuting = true;
-        try {
-            const currentLine = activeEditor.selection.active.line;
-            // After first press the user lands at the call site — that's when toggleTarget is set.
-            // So second-press condition is: near the call site with a toggleTarget waiting.
-            const isNearCallSite =
-                activeUri === pair.callSiteUri.toString() &&
-                Math.abs(currentLine - pair.callSiteLine) <= 2;
+        // Priority 2: If stack is empty, toggle forward to the last popped definition
+        const lastPopped = getLastPopped(activeUri);
+        if (lastPopped && lastPopped.definitionLine !== undefined) {
+            jumpState.isExecuting = true;
+            try {
+                log.info(`Toggle forward -> jumping back to definition line:${lastPopped.definitionLine}`);
+                const doc = await vscode.workspace.openTextDocument(lastPopped.uri);
+                const anchoredDefLine = reAnchorToken(doc, lastPopped.definitionLine, lastPopped.token);
 
-            log.info(`Jump back: isNearCallSite=${isNearCallSite} toggleTarget=${!!pair.toggleTarget} activeUri=${activeUri}`);
+                // Push back to stack so it can be popped again
+                pushLastPoppedBack(activeUri, lastPopped);
 
-            if (isNearCallSite && pair.toggleTarget) {
-                log.info(`Toggle → back to definition`);
-                await revealAt(
-                    pair.toggleTarget.uri,
-                    pair.toggleTarget.line,
-                    pair.toggleTarget.character
-                );
-                popPair(pair);
-            } else {
-                log.info(`First press → jumping to call site ${pair.callSiteUri.fsPath}:${pair.callSiteLine}`);
-                // First press: record current position as toggle target, jump to call site
-                pair.toggleTarget = {
-                    uri:       activeEditor.document.uri,
-                    line:      currentLine,
-                    character: activeEditor.selection.active.character,
-                };
-
-                const callDoc = await vscode.workspace.openTextDocument(pair.callSiteUri);
-                const anchoredLine = reAnchorToken(callDoc, pair.callSiteLine, pair.callSiteToken);
-                await revealAt(pair.callSiteUri, anchoredLine, pair.callSiteCharacter);
+                await revealAt(lastPopped.uri, anchoredDefLine, lastPopped.character);
+            } finally {
+                jumpState.isExecuting = false;
             }
-        } finally {
-            jumpState.isExecuting = false;
+            return;
         }
+
+        log.info(`Jump back pressed — stack empty and no toggle target for active file: ${activeUri}`);
     });
 }

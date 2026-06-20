@@ -2,7 +2,7 @@
   "name": "call-site-navigator",
   "displayName": "Call Site Navigator",
   "description": "Jump back to the exact call site after a Go to Definition, bypassing VS Code's global navigation stack.",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "publisher": "srk-tools",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -17,7 +17,9 @@
     "url": "https://github.com/siva-krish45/Call-Site-Navigator/issues"
   },
   "homepage": "https://github.com/siva-krish45/Call-Site-Navigator#readme",
-  "activationEvents": [],
+  "activationEvents": [
+    "*"
+  ],
   "main": "./out/src/extension.js",
   "contributes": {
     "commands": [

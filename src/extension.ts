@@ -3,9 +3,7 @@ import { createDefinitionProvider } from './provider';
 import { createGoToDefinitionCommand } from './goToDefinition';
 import { createJumpBackCommand } from './jumpBack';
 import {
-    createActiveEditorListener,
     createSelectionListener,
-    createDocumentChangeListener,
     createDocumentCloseListener,
     primeNavigationTracking,
     setDiagnosticRaw,
@@ -13,7 +11,7 @@ import {
 import { clearAll, dumpState } from './store';
 import { log } from './log';
 
-let diagnosticsOn = false;
+let diagnosticsOn = true;
 
 export function activate(context: vscode.ExtensionContext): void {
     log.info('Call Site Navigator activated');
@@ -26,8 +24,6 @@ export function activate(context: vscode.ExtensionContext): void {
         createGoToDefinitionCommand(),
         // Ctrl+Click intercept — fires if VS Code calls the provider chain
         vscode.languages.registerDefinitionProvider({ scheme: 'file' }, createDefinitionProvider()),
-        // Cross-file Ctrl+Click pair completion — fires after navigation
-        createActiveEditorListener(),
         // Jump back hotkey
         createJumpBackCommand(),
         // Diagnostics
@@ -40,9 +36,8 @@ export function activate(context: vscode.ExtensionContext): void {
             setDiagnosticRaw(diagnosticsOn);
             log.show();
         }),
-        // Toggle/clear guards + cursor tracking
+        // Guards + cursor tracking
         createSelectionListener(),
-        createDocumentChangeListener(),
         createDocumentCloseListener(),
     );
 }
