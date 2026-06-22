@@ -2,7 +2,7 @@
   "name": "call-site-navigator",
   "displayName": "Call Site Navigator",
   "description": "Jump back to the exact call site after a Go to Definition, bypassing VS Code's global navigation stack.",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "publisher": "srk-tools",
   "license": "MIT",
   "icon": "images/icon.png",
